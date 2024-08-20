@@ -34,8 +34,8 @@ class BitNetInference:
             The device to run the model on ('cpu' or 'cuda'). By default, 'cuda' is used.
         """
         self.device = device
-        self.model = BitNetTransformer(num_tokens=256, dim=512, depth=8)
-        self.model = AutoregressiveWrapper(self.model, max_seq_len=1024)
+        self.model = BitNetTransformer(num_tokens=512, dim=1024, depth=18, heads=16, ff_mult=4)
+        self.model = AutoregressiveWrapper(self.model, max_seq_len=512)
         self.model.to(self.device)
 
     def load_model(self, model_path):

@@ -130,11 +130,11 @@ class BitNetTransformer(nn.Module):
             dim=dim, depth=depth, heads=heads, ff_mult=ff_mult
         )
 
-        # self.to_logits = nn.Sequential(RMSNorm(dim), nn.Linear(dim, num_tokens))
-        self.to_logits = OutputHead(
-            dim,
-            vocab_size=num_tokens,
-        )
+        self.to_logits = nn.Sequential(RMSNorm(dim), nn.Linear(dim, num_tokens))
+        # self.to_logits = OutputHead(
+        #     dim,
+        #     vocab_size=num_tokens,
+        # )
         
         # Norm
         self.norm = nn.LayerNorm(dim)

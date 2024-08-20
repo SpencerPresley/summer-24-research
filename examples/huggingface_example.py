@@ -1,6 +1,9 @@
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
+import sys
+import os
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bitnet import replace_linears_in_hf
 
 # Load a model from Hugging Face's Transformers
@@ -12,7 +15,7 @@ model = AutoModelForSequenceClassification.from_pretrained(model_name)
 replace_linears_in_hf(model)
 
 # Example text to classify
-text = "Replace this with your text"
+text = "Hi there!"
 inputs = tokenizer(
     text, return_tensors="pt", padding=True, truncation=True, max_length=512
 )
