@@ -101,7 +101,22 @@ class AutoregressiveWrapper(nn.Module):
         out = out[:, t:]
         return out
 
+    # STANDARD FORWARD
+    # def forward(self, x, **kwargs):
+    #     x_inp, x_labels = x[:, :-1], x[:, 1:]
+    #     logits = self.net(x_inp, **kwargs)
+    #     return F.cross_entropy(rearrange(logits, "b c n -> b n c"), x_labels)
+
+    # # FOR PPL BENCHMARKING
+    # def forward(self, x, **kwargs):
+    #     x_inp, x_labels = x[:, :-1], x[:, 1:]
+    #     logits = self.net(x_inp, **kwargs)
+    #     return logits
+    
+    # For latency, memory, and perplexity benchmarking
     def forward(self, x, **kwargs):
-        x_inp, x_labels = x[:, :-1], x[:, 1:]
+        if x.dim() == 1:
+            x = x.unsqueeze(0)  # Add batch dimension if it's missing
+        x_inp = x[:, :-1]  # Use all but the last token as input
         logits = self.net(x_inp, **kwargs)
-        return F.cross_entropy(rearrange(logits, "b c n -> b n c"), x_labels)
+        return logits

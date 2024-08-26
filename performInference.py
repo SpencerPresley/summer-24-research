@@ -6,7 +6,8 @@ inference_model = BitNetInference()
 model_path = "bitnet_300M_final_model.pth"
 inference_model.load_model(model_path)
 
-input_text = "The history of computer science began long before the modern discipline of computer science that emerged in the 20th century. The progression from mechanical inventions and mathematical theories towards modern computer concepts and machines traces a history that forms a major part of the history of technology."
-generated_length = 500
+input_text = "In physics, the conservation laws state that certain physical properties (such as energy, mass, momentum, and angular momentum) of an isolated system remain constant over time. These laws are fundamental to the understanding of many physical processes, and they are often derived from the symmetries of the physical system."
+generated_length = 1024
 generated_text = inference_model.generate(input_text, generated_length)
-print(f"Generated text:\n{generated_text}")
+print(f"\nInput text:\n{input_text}")
+print(f"\nGenerated text:\n{generated_text}")
