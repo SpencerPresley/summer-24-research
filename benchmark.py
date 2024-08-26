@@ -9,10 +9,12 @@ from openpyxl.utils import get_column_letter
 import matplotlib.pyplot as plt
 from matplotlib import colors
 import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
 from datasets import load_dataset
-from sklearn.metrics import accuracy_score
 import gzip
 import sys
+from transformers import GPT2Tokenizer
 
 # For accurate memory usage benchmarking
 import gc
@@ -22,7 +24,11 @@ from bitnet.at import AutoregressiveWrapper
 from torch.utils.data import DataLoader, Dataset
 import torch.nn.functional as F
 
-MAX_BATCHES = 5000
+# Remove caches
+import importlib
+importlib.invalidate_caches()
+
+MAX_BATCHES = 5
 SEQ_LEN = 2048
 BATCH_SIZE = 8
 
@@ -33,6 +39,8 @@ benchmarks = [
     ('Text Continuation Perplexity', lambda dataset_name: text_continuation_benchmark(model, device, dataset_name)),
     ('Next Character Prediction Accuracy', lambda dataset_name: next_char_prediction_benchmark(model, device, dataset_name)),
 ]
+
+loaded_datasets = {}
 
 dataset_paths = {
     "enwik8": "./data/enwik8.gz",
@@ -97,16 +105,21 @@ benchmark_descriptions = {
 }
 
 def load_dataset_by_name(dataset_name):
+    if dataset_name in loaded_datasets:
+        return loaded_datasets[dataset_name]
+    
     if dataset_name in ["enwik8", "enwik9"]:
         with gzip.open(dataset_paths[dataset_name], 'rb') as file:
             data = file.read()
         # Convert bytes to integers, capping at 255
-        return torch.tensor([min(b, 255) for b in data], dtype=torch.long)
+        data = torch.tensor([min(b, 255) for b in data], dtype=torch.long)
     else:
         dataset = load_dataset("wikitext", dataset_paths[dataset_name], split="test")
-        text = " ".join(dataset["text"])
+        data = " ".join(dataset["text"])
         # For word-level datasets, we'll tokenize later
-        return text
+    
+    loaded_datasets[dataset_name] = data
+    return data
 
 def prepare_data_and_dataloader(dataset_name, seq_len=1024, batch_size=1):
     data = load_dataset_by_name(dataset_name)
@@ -135,13 +148,19 @@ class TextSamplerDataset(Dataset):
             self.encoded_data = self.data
 
     def __getitem__(self, index):
-        rand_start = torch.randint(0, self.encoded_data.size(0) - self.seq_len - 1, (1,))
-        full_seq = self.encoded_data[rand_start : rand_start + self.seq_len + 1].long()
+        max_start = max(0, self.encoded_data.size(0) - self.seq_len - 1)
+        rand_start = torch.randint(0, max_start + 1, (1,))
+        full_seq = self.encoded_data[rand_start : min(rand_start + self.seq_len + 1, self.encoded_data.size(0))].long()
+        
+        # Pad sequence if it's shorter than seq_len + 1
+        if full_seq.size(0) < self.seq_len + 1:
+            padding = torch.zeros(self.seq_len + 1 - full_seq.size(0), dtype=torch.long)
+            full_seq = torch.cat([full_seq, padding])
+        
         return full_seq
 
     def __len__(self):
-        return self.encoded_data.size(0) // self.seq_len
-
+        return max(1, self.encoded_data.size(0) // self.seq_len)
 def check_existing_results(model_name, filename='bitnet_benchmark_results.xlsx'):
     try:
         wb = load_workbook(filename)
@@ -158,96 +177,152 @@ def calculate_model_parameters(model):
     return sum(p.numel() for p in model.parameters())
 
 def load_model(model_path):
-    # Load the state dict
-    state_dict = torch.load(model_path, map_location='cpu')
-    
-    # PRint state dict keys and shapes
-    for key, value in state_dict.items():
-        print(f"Key: {key}, Shape: {value.shape}")
-    
-    if model_path == "bitnet_final_model.pth":
-        model = BitNetTransformer(num_tokens=256, dim=512, depth=8)
-    elif model_path == "bitnet_300M_final_model.pth":
-        model = BitNetTransformer(num_tokens=512, dim=1024, depth=18, heads=16, ff_mult=4)
+    print(f"Loading model from {model_path}...")
+    try:
+        # Load the state dict
+        state_dict = torch.load(model_path, map_location='cpu')
+        
+        if model_path == "bitnet_final_model.pth":
+            model = BitNetTransformer(num_tokens=256, dim=512, depth=8)
+        elif model_path == "bitnet_300M_final_model.pth":
+            model = BitNetTransformer(num_tokens=512, dim=1024, depth=18, heads=16, ff_mult=4)
 
-    model = AutoregressiveWrapper(model, max_seq_len=1024)
-    
-    try:
+        model = AutoregressiveWrapper(model, max_seq_len=1024)
+        
         model.load_state_dict(state_dict)
-    except RuntimeError as e:
-        print(f"Error loading state dict: {e}")
-        print("Model structure:")
-        print(model)
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    try:
-        model = model.to(device)
-    except RuntimeError:
-        print("CUDA out of memory. Falling back to CPU.")
-        device = torch.device("cpu")
-        model = model.to(device)
-    
-    print("Model structure:")
-    print(model)
-    
-    return model, device
+        print("Model loaded successfully.")
+        
+        # Try CUDA first, fall back to CPU if there's an error
+        try:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model = model.to(device)
+            print(f"Model moved to device: {device}")
+        except RuntimeError as e:
+            print(f"CUDA error: {e}")
+            print("Falling back to CPU.")
+            device = torch.device("cpu")
+            model = model.to(device)
+        
+        return model, device
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        raise
 
 def benchmark_ppl(model, device, dataset_name):
     print(f"Benchmarking perplexity for {dataset_name}...")
     data = load_dataset_by_name(dataset_name)
     is_byte_level = dataset_name in ["enwik8", "enwik9"]
-    dataset = TextSamplerDataset(data, seq_len=1024, is_byte_level=is_byte_level)
+    dataset = TextSamplerDataset(data, seq_len=512, is_byte_level=is_byte_level)  # Reduced seq_len
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
     
     model.eval()
     total_loss = 0
     total_tokens = 0
-    total_batches = len(dataloader)
     processed_batches = 0
     
     with torch.no_grad():
         print(f"Starting benchmark...")
-        for batch_count, batch in enumerate(dataloader, 1):
+        for batch in dataloader:
+            if processed_batches >= MAX_BATCHES:
+                print(f"\nReached MAX_BATCHES ({MAX_BATCHES}). Stopping.")
+                break
+
             try:
-                sys.stdout.write(f"\rBatch {batch_count}/{MAX_BATCHES}")
-                sys.stdout.flush()
+                processed_batches += 1
+                print(f"\nProcessing batch {processed_batches}/{MAX_BATCHES}")
                 
                 batch = batch[0].to(device)
                 input_ids = batch[:-1]
                 target_ids = batch[1:]
                 
+                print(f"Input shape: {input_ids.shape}, Target shape: {target_ids.shape}")
+                
                 logits = model(input_ids.unsqueeze(0))
+                print(f"Logits shape: {logits.shape}")
                 
                 if logits.dim() == 3:
                     logits = logits.squeeze(0)
-                    
-                    min_len = min(logits.size(0), target_ids.size(0))
-                    logits = logits[:min_len]
-                    target_ids = target_ids[:min_len]
-                    
-                    loss = F.cross_entropy(logits, target_ids, reduction='sum')
-                else:
-                    print(f"Unexpected logits dimension: {logits.dim()}. Skipping this batch.")
-                    continue
+                
+                min_len = min(logits.size(0), target_ids.size(0))
+                logits = logits[:min_len]
+                target_ids = target_ids[:min_len]
+                
+                print(f"Final logits shape: {logits.shape}, Final target shape: {target_ids.shape}")
+                
+                loss = F.cross_entropy(logits, target_ids, reduction='sum')
                 
                 total_loss += loss.item()
                 total_tokens += target_ids.numel()
                 
-                processed_batches += 1
-                if processed_batches >= MAX_BATCHES:
-                    break
-                
-            except RuntimeError as e:
-                print(f"Error processing batch {batch_count}: {e}")
+            except Exception as e:
+                print(f"Error processing batch {processed_batches}: {str(e)}")
                 continue
-    
+
     if total_tokens == 0:
         print("No valid batches processed. Cannot compute perplexity.")
         return float('inf')
     
     perplexity = math.exp(total_loss / total_tokens)
     print(f"\nPerplexity for {dataset_name}: {perplexity:.4f}")
+    print(f"Processed {processed_batches} batches.")
     return perplexity
+
+# def benchmark_ppl(model, device, dataset_name):
+#     print(f"Benchmarking perplexity for {dataset_name}...")
+#     data = load_dataset_by_name(dataset_name)
+#     is_byte_level = dataset_name in ["enwik8", "enwik9"]
+#     dataset = TextSamplerDataset(data, seq_len=1024, is_byte_level=is_byte_level)
+#     dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
+    
+#     model.eval()
+#     total_loss = 0
+#     total_tokens = 0
+#     total_batches = len(dataloader)
+#     processed_batches = 0
+    
+#     with torch.no_grad():
+#         print(f"Starting benchmark...")
+#         for batch_count, batch in enumerate(dataloader, 1):
+#             try:
+#                 sys.stdout.write(f"\rBatch {batch_count}/{MAX_BATCHES}")
+#                 sys.stdout.flush()
+                
+#                 batch = batch[0].to(device)
+#                 input_ids = batch[:-1]
+#                 target_ids = batch[1:]
+                
+#                 logits = model(input_ids.unsqueeze(0))
+                
+#                 if logits.dim() == 3:
+#                     logits = logits.squeeze(0)
+                    
+#                     min_len = min(logits.size(0), target_ids.size(0))
+#                     logits = logits[:min_len]
+#                     target_ids = target_ids[:min_len]
+                    
+#                     loss = F.cross_entropy(logits, target_ids, reduction='sum')
+#                 else:
+#                     print(f"Unexpected logits dimension: {logits.dim()}. Skipping this batch.")
+#                     continue
+                
+#                 total_loss += loss.item()
+#                 total_tokens += target_ids.numel()
+                
+#                 processed_batches += 1
+#                 if processed_batches >= MAX_BATCHES:
+#                     break
+                
+#             except Exception as e:
+#                 print(f"Error processing batch {batch_count}: {e}")
+#                 continue
+    
+#     if total_tokens == 0:
+#         print("No valid batches processed. Cannot compute perplexity.")
+#         return float('inf')
+    
+#     perplexity = math.exp(total_loss / total_tokens)
+#     print(f"\nPerplexity for {dataset_name}: {perplexity:.4f}")
+#     return perplexity
 
 def benchmark_latency(model, device, dataset_name):
     print(f"Benchmarking latency for {dataset_name}...")
@@ -411,7 +486,7 @@ def save_results_to_image(results, filename='bitnet_benchmark_results.png'):
     
 import random
 
-def text_continuation_benchmark(model, device, dataset_name, num_samples=100, prefix_length=64, continuation_length=64, seed=None):
+def text_continuation_benchmark(model, device, dataset_name, num_samples=5, prefix_length=64, continuation_length=64, seed=None):
     if seed is None:
         seed = random.randint(1, 10000)
     print(f"Benchmarking text continuation on {dataset_name} with seed {seed}...")
@@ -436,6 +511,12 @@ def text_continuation_benchmark(model, device, dataset_name, num_samples=100, pr
                 start_idx = random.randint(0, len(data) - prefix_length - continuation_length - 1)
                 prefix = data[start_idx:start_idx + prefix_length]
                 true_continuation = data[start_idx + prefix_length:start_idx + prefix_length + continuation_length]
+                
+                # Convert to tensor if it's a string
+                if isinstance(prefix, str):
+                    prefix = torch.tensor([ord(c) for c in prefix], dtype=torch.long)
+                if isinstance(true_continuation, str):
+                    true_continuation = torch.tensor([ord(c) for c in true_continuation], dtype=torch.long)
                 
                 input_ids = prefix.unsqueeze(0).to(device)
                 true_continuation_ids = true_continuation.unsqueeze(0).to(device)
@@ -497,7 +578,7 @@ def text_continuation_benchmark(model, device, dataset_name, num_samples=100, pr
     
     return avg_perplexity, avg_char_accuracy, avg_char_similarity
 
-def next_char_prediction_benchmark(model, device, dataset_name, num_samples=1000, sequence_length=128, seed=42):
+def next_char_prediction_benchmark(model, device, dataset_name, num_samples=100, sequence_length=128, seed=42):
     print(f"Benchmarking next-character prediction accuracy on {dataset_name} with seed {seed}...")
     
     data = load_dataset_by_name(dataset_name)
@@ -519,7 +600,13 @@ def next_char_prediction_benchmark(model, device, dataset_name, num_samples=1000
             try:
                 start_idx = random.randint(0, len(data) - sequence_length - 1)
                 input_seq = data[start_idx:start_idx + sequence_length]
-                target_char = data[start_idx + sequence_length].item()
+                target_char = data[start_idx + sequence_length]
+                
+                # Convert to tensor if it's a string
+                if isinstance(input_seq, str):
+                    input_seq = torch.tensor([ord(c) for c in input_seq], dtype=torch.long)
+                if isinstance(target_char, str):
+                    target_char = ord(target_char)
                 
                 input_ids = input_seq.unsqueeze(0).to(device)
                 target_id = torch.tensor([target_char], dtype=torch.long).to(device)
@@ -575,6 +662,13 @@ if __name__ == "__main__":
     model_paths = ["bitnet_300M_final_model.pth", "bitnet_final_model.pth"]
     datasets = dataset_paths.keys()
     
+    # this takes up too much memory
+    # print(f"Preloading datasets...")
+    # for dataset_name in datasets:
+    #     load_dataset_by_name(dataset_name)
+    #     print(f"Preloaded dataset: {dataset_name}")
+    # print(f"Preloading complete.")
+    
     sys.stdout.flush()
     sys.stderr.flush()
     
@@ -614,72 +708,114 @@ if __name__ == "__main__":
             dataset, dataloader = prepare_data_and_dataloader(dataset_name)
 
             print(f"Dataset: {dataset}")
-            print(f"Initial Dataloader: {dataloader}")
+            # print(f"Initial Dataloader: {dataloader}")
 
             # Move data to the same device as the model
             dataloader = DataLoader(dataset, batch_size=1, shuffle=False, 
                                     collate_fn=lambda x: [i.to(device) for i in x])
 
-            print(f"Device-aware Dataloader: {dataloader}")
+            # print(f"Device-aware Dataloader: {dataloader}")
                         
             # existing_results = check_existing_results(model_name)
             # results[model_name] = existing_results.copy()
-            results[result_key] = {}
-            results[result_key]['Model'] = model_name
-            results[result_key]['Benchmark Dataset'] = dataset_name
-            results[result_key]['Parameters'] = f"{calculate_model_parameters(model) / 1e6:.2f}M"
-            results[result_key]['Training Dataset'] = train_dataset
-            results[result_key]['Size (MB)'] = get_model_size(model_path)
+            results[result_key] = {
+                'Model': model_name,
+                'Benchmark Dataset': dataset_name,
+                'Parameters': f"{calculate_model_parameters(model) / 1e6:.2f}M",
+                'Training Dataset': train_dataset,
+                'Size (MB)': get_model_size(model_path)
+            }
             
+            # Skip certain benchmarks for wikitext datasets by providing a default placeholder value
+            if dataset_name in ["wikitext-2", "wikitext-103"]:
+                results[result_key]['Perplexity (PPL)'] = "N/A (skipped for wikitext)"
+                results[result_key]['Latency (ms)'] = "N/A (skipped for wikitext)"
+                results[result_key]['Memory (MB)'] = "N/A (skipped for wikitext)"
+                results[result_key]['Bits Per Character (BPC)'] = "N/A (skipped for wikitext)"
+                results[result_key]['Compression Ratio'] = "N/A (skipped for wikitext)"
+            
+            # Run benchmarks that are applicable to all datasets
             try:
                 accuracy, avg_prob = next_char_prediction_benchmark(model, device, dataset_name)
                 results[result_key]['Next Character Prediction Accuracy'] = accuracy
                 results[result_key]['Average Target Character Probability'] = avg_prob
-            except RuntimeError as e:
+            except Exception as e:
                 print(f"Error benchmarking next character prediction: {e}")
-                results[result_key]['Next Character Prediction Accuracy'] = float('inf')
-                results[result_key]['Average Target Character Probability'] = float('inf')
-                
+                results[result_key]['Next Character Prediction Accuracy'] = "Error"
+                results[result_key]['Average Target Character Probability'] = "Error"
+            
             try:
                 text_cont_ppl, char_acc, char_sim = text_continuation_benchmark(model, device, dataset_name)
                 results[result_key]['Text Continuation Perplexity'] = text_cont_ppl
                 results[result_key]['Text Continuation Character Accuracy'] = char_acc
                 results[result_key]['Text Continuation Character Similarity'] = char_sim
-            except RuntimeError as e:
+            except Exception as e:
                 print(f"Error benchmarking text continuation: {e}")
-                results[result_key]['Text Continuation Perplexity'] = float('inf')
-                results[result_key]['Text Continuation Character Accuracy'] = float('inf')
-                results[result_key]['Text Continuation Character Similarity'] = float('inf')
+                results[result_key]['Text Continuation Perplexity'] = "Error"
+                results[result_key]['Text Continuation Character Accuracy'] = "Error"
+                results[result_key]['Text Continuation Character Similarity'] = "Error"
                 
             
-            for metric, benchmark_func in benchmarks:
-                if metric not in results[result_key]:
-                    print(f"Benchmarking {metric}...")
+            # Run additional benchmarks only for non-wikitext datasets
+            if dataset_name not in ["wikitext-2", "wikitext-103"]:
+                for metric, benchmark_func in benchmarks:
+                    if metric not in results[result_key]:
+                        print(f"Benchmarking {metric}...")
+                        try:
+                            results[result_key][metric] = benchmark_func(dataset_name)
+                        except Exception as e:
+                            print(f"Error benchmarking {metric}: {e}")
+                            results[result_key][metric] = "Error"
+                    else:
+                        print(f"Skipping {metric} as it is already in results.\nExisting result for {metric}: {results[result_key][metric]}")
+                        
+                # Calculate BPC and Compression Ratio for non-wikitext datasets
+                if 'Perplexity (PPL)' in results[result_key] and results[result_key]['Perplexity (PPL)'] != "Error":
                     try:
-                        results[result_key][metric] = benchmark_func(dataset_name)
-                    except RuntimeError as e:
-                        print(f"Error benchmarking {metric}: {e}")
-                        results[result_key][metric] = float('inf')
-                else:
-                    print(f"Using existing result for {metric}: {results[result_key][metric]}")
+                        results[result_key]['Bits Per Character (BPC)'] = math.log2(float(results[result_key]['Perplexity (PPL)'])) / 8
+                        results[result_key]['Compression Ratio'] = 8 / results[result_key]['Bits Per Character (BPC)']
+                    except ValueError:
+                        print(f"Error calculating BPC or Compression Ratio")
+                        results[result_key]['Bits Per Character (BPC)'] = "Error: Could not calculate"
+                        results[result_key]['Compression Ratio'] = "Error: Could not calculate"
                     
-            # Special case for BPC as it's derived from PPL
-            if 'Perplexity (PPL)' in results[result_key] and 'Bits Per Character (BPC)' not in results[result_key]:
-                results[result_key]['Bits Per Character (BPC)'] = math.log2(results[result_key]['Perplexity (PPL)']) / 8
+            # # Special case for BPC as it's derived from PPL
+            # if ('Perplexity (PPL)' in results[result_key] and
+            #     'Bits Per Character (BPC)' not in results[result_key] and
+            #     results[result_key]['Perplexity (PPL)'] != "N/A (skipped for wikitext)"):
+            #     try:
+            #         results[result_key]['Bits Per Character (BPC)'] = math.log2(float(results[result_key]['Perplexity (PPL)'])) / 8
+            #     except ValueError:
+            #         print(f"Error calculating BPC: Invalid PPL value {results[result_key]['Perplexity (PPL)']}")
+            #         results[result_key]['Bits Per Character (BPC)'] = "Error: Could not calculate"
             
-            if 'Bits Per Character (BPC)' in results[result_key] and 'Compression Ratio' not in results[result_key]:
-                results[result_key]['Compression Ratio'] = 8 / results[result_key]['Bits Per Character (BPC)']
+            # if ('Bits Per Character (BPC)' in results[result_key] and
+            #     'Compression Ratio' not in results[result_key] and
+            #     results[result_key]['Bits Per Character (BPC)'] != "N/A (skipped for wikitext)" and
+            #     results[result_key]['Bits Per Character (BPC)'] != "Error: Could not calculate"):
+            #     try:
+            #         results[result_key]['Compression Ratio'] = 8 / float(results[result_key]['Bits Per Character (BPC)'])
+            #     except ValueError:
+            #         print(f"Error calculating Compression Ratio: Invalid BPC value {results[result_key]['Bits Per Character (BPC)']}")
+            #         results[result_key]['Compression Ratio'] = "Error: Could not calculate"
+            
+            # For wikitext datasets, set BPC and Compression Ratio to N/A if PPL is N/A
+            # if results[result_key].get('Perplexity (PPL)') == "N/A (skipped for wikitext)":
+            #     results[result_key]['Bits Per Character (BPC)'] = "N/A (skipped for wikitext)"
+            #     results[result_key]['Compression Ratio'] = "N/A (skipped for wikitext)"
             
             print(f"Benchmarking complete for {model_name} on {dataset_name}")
             time.sleep(2)
             print("Continuing to next model/dataset...")
             time.sleep(1)
             
-            # Save results after each model to prevent data loss if the script is interrupted
-            save_results_to_excel({result_key: results[result_key]})
+            # # Save results after each model to prevent data loss if the script is interrupted
+            # save_results_to_excel({result_key: results[result_key]})
     
+    # Add benchmark descriptions in a separate loop
     for result_key in results:
-        for metric in results[result_key]:
+        metrics_to_describe = list(results[result_key].keys())  # Create a list of metrics to avoid modifying during iteration
+        for metric in metrics_to_describe:
             if metric in benchmark_descriptions:
                 results[result_key][f"{metric} Short Description"] = benchmark_descriptions[metric]['short']
                 results[result_key][f"{metric} Detailed Description"] = benchmark_descriptions[metric]['detailed']
@@ -688,13 +824,13 @@ if __name__ == "__main__":
     save_results_to_excel(results)
     # save_results_to_image(results)
     
-    for result_key in results:
+    for result_key in list(results.keys()):  # Use list to avoid RuntimeError from modifying the dictionary during iteration
         print(f"=====================")
         print(f"Model: {results[result_key]['Model']}")
-        print(f"Test Dataset: {results[result_key]['Test Dataset']}")
+        print(f"Test Dataset: {results[result_key]['Benchmark Dataset']}")
         print(f"Training Dataset: {results[result_key]['Training Dataset']}")
         for metric, value in results[result_key].items():
-            if not metric.endswith("Description") and metric not in ['Model', 'Test Dataset', 'Training Dataset']:
+            if not metric.endswith("Description") and metric not in ['Model', 'Benchmark Dataset', 'Training Dataset']:
                 print(f"{metric}: {value}")
                 if f"{metric} Short Description" in results[result_key]:
                     print(f"  Short: {results[result_key][f'{metric} Short Description']}")
