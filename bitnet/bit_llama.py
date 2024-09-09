@@ -14,7 +14,6 @@ from fairscale.nn.model_parallel.layers import (
 )
 from torch import nn
 
-
 @dataclass
 class ModelArgs:
     dim: int = 4096

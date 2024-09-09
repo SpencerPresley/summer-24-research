@@ -55,7 +55,7 @@ blinker==1.7.0
 blis==0.7.11
 boto3==1.34.67
 botocore==1.34.67
-Bottleneck @ file:///croot/bottleneck_1707864210935/work
+Bottleneck==1.3.7
 Brotli==1.1.0
 build==1.0.3
 cachetools==5.4.0
@@ -185,8 +185,8 @@ matplotlib==3.8.2
 matplotlib-inline==0.1.6
 mccabe==0.7.0
 mdurl==0.1.2
-mkl-fft @ file:///croot/mkl_fft_1695058164594/work
-mkl-random @ file:///croot/mkl_random_1695059800811/work
+mkl-fft==1.3.8
+mkl-random==1.2.4
 mkl-service==2.4.0
 ml-dtypes==0.4.0
 mmh3==4.1.0
@@ -228,7 +228,7 @@ openapi-core==0.18.2
 openapi-schema-validator==0.6.2
 openapi-spec-validator==0.7.1
 opencv-python==4.9.0.80
-openpyxl @ file:///croot/openpyxl_1721752957391/work
+openpyxl==3.1.5
 opentelemetry-api==1.22.0
 opentelemetry-exporter-otlp-proto-common==1.22.0
 opentelemetry-exporter-otlp-proto-grpc==1.22.0
@@ -255,6 +255,7 @@ pendulum==3.0.0
 pexpect==4.9.0
 pikepdf==8.11.2
 pillow==10.2.0
+pip==24.0
 platformdirs==4.2.0
 pluggy==1.4.0
 plumbum==1.8.2
@@ -296,7 +297,7 @@ pyphen==0.14.0
 PyPika==0.48.9
 pyproject_hooks==1.0.0
 PyQt5==5.15.10
-PyQt5-sip @ file:///croot/pyqt-split_1698769088074/work/pyqt_sip
+PyQt5-sip==12.13.0
 pysqlite3-binary==0.5.2.post3
 pytesseract==0.3.10
 pytest==7.4.2
@@ -326,8 +327,9 @@ scipy==1.9.3
 seaborn==0.13.2
 semantic-kernel==0.5.0.dev0
 sentencepiece==0.1.99
+setuptools==69.5.1
 sgmllib3k==1.0.0
-sip @ file:///croot/sip_1698675935381/work
+sip==6.7.12
 six==1.16.0
 skypilot==0.4.1
 smart-open==6.4.0
@@ -379,11 +381,11 @@ triton==2.2.0
 typeguard==2.13.3
 typer==0.9.0
 typing==3.7.4.3
-typing-inspect==0.9.0
 typing_extensions==4.10.0
+typing-inspect==0.9.0
 tzdata==2023.4
 tzlocal==5.2
-unicodedata2 @ file:///croot/unicodedata2_1713212950228/work
+unicodedata2==15.1.0
 unstructured==0.12.2
 unstructured-client==0.18.0
 unstructured-inference==0.7.23
@@ -403,6 +405,7 @@ weasyprint==61.0
 websocket-client==1.7.0
 websockets==12.0
 Werkzeug==3.0.3
+wheel==0.43.0
 wrapt==1.14.1
 xxhash==3.4.1
 yarl==1.9.4
