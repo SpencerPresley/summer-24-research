@@ -237,7 +237,7 @@ opentelemetry-instrumentation-asgi==0.43b0
 opentelemetry-instrumentation-fastapi==0.43b0
 opentelemetry-proto==1.22.0
 opentelemetry-sdk==1.22.0
-opentelemetry-semantic-conventions==0.43b0
+opentelemetry-semantic-conventions==0.48b0
 opentelemetry-util-http==0.43b0
 opt-einsum==3.3.0
 optree==0.12.1
