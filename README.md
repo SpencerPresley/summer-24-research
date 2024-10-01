@@ -1,3 +1,5 @@
+# **FORK OF [BitNet by KyeGomez](https://github.com/kyegomez/BitNet) WITH ADDED CODE THAT IS RELATED TO MY RESEARCH**  
+
 [![Multi-Modality](agorabanner.png)](https://discord.gg/qUtxnK2NMf)
 
 # BitNet
